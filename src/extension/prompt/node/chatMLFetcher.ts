@@ -1059,7 +1059,7 @@ export class ChatMLFetcherImpl extends AbstractChatMLFetcher {
 		const handle = connection.sendRequest(request, cancellationToken);
 
 		const extendedBaseTelemetryData = baseTelemetryData.extendedBy({ modelCallId });
-		const processor = this._instantiationService.createInstance(OpenAIResponsesProcessor, extendedBaseTelemetryData, modelRequestId.headerRequestId, modelRequestId.gitHubRequestId);
+		const processor = this._instantiationService.createInstance(OpenAIResponsesProcessor, extendedBaseTelemetryData, modelRequestId.headerRequestId, modelRequestId.gitHubRequestId, (message: string) => this._logService.info(message));
 
 		const chatCompletions = new AsyncIterableObject<ChatCompletion>(async emitter => {
 			try {

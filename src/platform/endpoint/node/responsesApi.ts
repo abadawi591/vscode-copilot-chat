@@ -29,6 +29,19 @@ import { rawPartAsPhaseData } from '../common/phaseDataContainer';
 import { getStatefulMarkerAndIndex } from '../common/statefulMarkerContainer';
 import { rawPartAsThinkingData } from '../common/thinkingDataContainer';
 
+export function getResponsesApiCompactionThreshold(configService: IConfigurationService, expService: IExperimentationService, endpoint: IChatEndpoint): number | undefined {
+	const contextManagementEnabled = configService.getExperimentBasedConfig(ConfigKey.ResponsesApiContextManagementEnabled, expService) && !modelsWithoutResponsesContextManagement.has(endpoint.family);
+	if (!contextManagementEnabled) {
+		return undefined;
+	}
+
+	return 1000;
+
+	// return endpoint.modelMaxPromptTokens > 0
+	// 	? Math.floor(endpoint.modelMaxPromptTokens * 0.9)
+	// 	: 50000;
+}
+
 export function createResponsesRequestBody(accessor: ServicesAccessor, options: ICreateEndpointBodyOptions, model: string, endpoint: IChatEndpoint): IEndpointBody {
 	const configService = accessor.get(IConfigurationService);
 	const expService = accessor.get(IExperimentationService);
@@ -56,11 +69,8 @@ export function createResponsesRequestBody(accessor: ServicesAccessor, options: 
 		text: verbosity ? { verbosity } : undefined,
 	};
 
-	const contextManagementEnabled = configService.getExperimentBasedConfig(ConfigKey.ResponsesApiContextManagementEnabled, expService) && !modelsWithoutResponsesContextManagement.has(endpoint.family);
-	if (contextManagementEnabled) {
-		const compactThreshold = endpoint.modelMaxPromptTokens > 0
-			? Math.floor(endpoint.modelMaxPromptTokens * 0.9)
-			: 50000;
+	const compactThreshold = getResponsesApiCompactionThreshold(configService, expService, endpoint);
+	if (compactThreshold !== undefined) {
 		body.context_management = [{
 			'type': openAIContextManagementCompactionType,
 			// Trigger compaction at 90% of the model max prompt context to keep headroom for active turns.
@@ -421,11 +431,11 @@ function responseFunctionOutputToRawContents(output: string | OpenAI.Responses.R
 	return coalesce(output.map(responseContentToRawContent));
 }
 
-export async function processResponseFromChatEndpoint(instantiationService: IInstantiationService, telemetryService: ITelemetryService, logService: ILogService, response: Response, expectedNumChoices: number, finishCallback: FinishedCallback, telemetryData: TelemetryData): Promise<AsyncIterableObject<ChatCompletion>> {
+export async function processResponseFromChatEndpoint(instantiationService: IInstantiationService, telemetryService: ITelemetryService, logService: ILogService, response: Response, expectedNumChoices: number, finishCallback: FinishedCallback, telemetryData: TelemetryData, compactionThreshold?: number): Promise<AsyncIterableObject<ChatCompletion>> {
 	return new AsyncIterableObject<ChatCompletion>(async feed => {
 		const requestId = response.headers.get('X-Request-ID') ?? generateUuid();
 		const ghRequestId = response.headers.get('x-github-request-id') ?? '';
-		const processor = instantiationService.createInstance(OpenAIResponsesProcessor, telemetryData, requestId, ghRequestId);
+		const processor = instantiationService.createInstance(OpenAIResponsesProcessor, telemetryData, requestId, ghRequestId, (message: string) => logService.info(message), compactionThreshold);
 		const parser = new SSEParser((ev) => {
 			try {
 				logService.trace(`SSE: ${ev.data}`);
@@ -467,6 +477,8 @@ interface CapiResponsesTextDeltaEvent extends Omit<OpenAI.Responses.ResponseText
 export class OpenAIResponsesProcessor {
 	private textAccumulator: string = '';
 	private hasReceivedReasoningSummary = false;
+	private sawCompactionMessage = false;
+	private compactionMessageId: string | undefined;
 	/** Maps output_index to { name, callId, arguments } for streaming tool call updates */
 	private readonly toolCallInfo = new Map<number, { name: string; callId: string; arguments: string }>();
 
@@ -474,6 +486,8 @@ export class OpenAIResponsesProcessor {
 		private readonly telemetryData: TelemetryData,
 		private readonly requestId: string,
 		private readonly ghRequestId: string,
+		private readonly logInfo: (message: string) => void,
+		private readonly compactionThreshold?: number,
 	) { }
 
 	public push(chunk: OpenAI.Responses.ResponseStreamEvent, _onProgress: FinishedCallback): ChatCompletion | undefined {
@@ -525,6 +539,8 @@ export class OpenAIResponsesProcessor {
 			case 'response.output_item.done':
 				if (chunk.item.type.toString() === openAIContextManagementCompactionType) {
 					const compactionItem = chunk.item as unknown as OpenAIContextManagementResponse;
+					this.sawCompactionMessage = true;
+					this.compactionMessageId = compactionItem.id;
 					return onProgress({
 						text: '',
 						contextManagement: {
@@ -582,6 +598,12 @@ export class OpenAIResponsesProcessor {
 					}
 				});
 			case 'response.completed':
+				if (this.sawCompactionMessage) {
+					this.logInfo(`[responsesAPI_compaction] OpenAI returned compaction item. headerRequestId=${this.requestId} ghRequestId=${this.ghRequestId || 'unknown'} completionId=${chunk.response.id} createdAt=${chunk.response.created_at} compactionMessageId=${this.compactionMessageId ?? 'unknown'} compactThreshold=${this.compactionThreshold ?? -1} promptTokens=${chunk.response.usage?.input_tokens ?? 0} totalTokens=${chunk.response.usage?.total_tokens ?? 0}`);
+				} else if (this.compactionThreshold !== undefined && (chunk.response.usage?.input_tokens ?? 0) >= this.compactionThreshold) {
+					const outputTypes = chunk.response.output.map(item => item.type).join(',');
+					this.logInfo(`[responsesAPI_compaction] Context management is enabled and compact threshold was met, but no compaction item was returned in the response output. headerRequestId=${this.requestId} ghRequestId=${this.ghRequestId || 'unknown'} completionId=${chunk.response.id} createdAt=${chunk.response.created_at} compactThreshold=${this.compactionThreshold} promptTokens=${chunk.response.usage?.input_tokens ?? 0} totalTokens=${chunk.response.usage?.total_tokens ?? 0} outputTypes=${outputTypes || 'none'}`);
+				}
 				onProgress({ text: '', statefulMarker: chunk.response.id });
 				return {
 					blockFinished: true,
