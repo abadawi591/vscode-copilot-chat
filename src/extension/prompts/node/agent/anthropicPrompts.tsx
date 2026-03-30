@@ -6,7 +6,8 @@
 import { BasePromptElementProps, PromptElement, PromptElementProps, PromptPiece, PromptSizing } from '@vscode/prompt-tsx';
 import type { LanguageModelToolInformation } from 'vscode';
 import { ConfigKey, IConfigurationService } from '../../../../platform/configuration/common/configurationService';
-import { CUSTOM_TOOL_SEARCH_NAME, isAnthropicContextEditingEnabled, isAnthropicCustomToolSearchEnabled, isAnthropicToolSearchEnabled, nonDeferredToolNames, TOOL_SEARCH_TOOL_NAME } from '../../../../platform/networking/common/anthropic';
+import { CUSTOM_TOOL_SEARCH_NAME, isAnthropicContextEditingEnabled, isAnthropicCustomToolSearchEnabled, isAnthropicToolSearchEnabled, TOOL_SEARCH_TOOL_NAME } from '../../../../platform/networking/common/anthropic';
+import { IToolDeferralService } from '../../../../platform/networking/common/toolDeferralService';
 import { IChatEndpoint } from '../../../../platform/networking/common/networking';
 import { IExperimentationService } from '../../../../platform/telemetry/common/nullExperimentationService';
 import { ToolName } from '../../../tools/common/toolNames';
@@ -33,6 +34,7 @@ class ToolSearchToolPrompt extends PromptElement<ToolSearchToolPromptProps> {
 		props: PromptElementProps<ToolSearchToolPromptProps>,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 		@IExperimentationService private readonly experimentationService: IExperimentationService,
+		@IToolDeferralService private readonly toolDeferralService: IToolDeferralService,
 	) {
 		super(props);
 	}
@@ -51,7 +53,7 @@ class ToolSearchToolPrompt extends PromptElement<ToolSearchToolPromptProps> {
 
 		// Get the list of deferred tools (tools not in the non-deferred set)
 		const deferredTools = this.props.availableTools
-			.filter(tool => !nonDeferredToolNames.has(tool.name))
+			.filter(tool => !this.toolDeferralService.isNonDeferredTool(tool.name))
 			.map(tool => tool.name)
 			.sort();
 
@@ -86,7 +88,11 @@ class ToolSearchToolPrompt extends PromptElement<ToolSearchToolPromptProps> {
 				NEVER do these:<br />
 				- Calling a deferred tool directly without loading it first with {searchToolName}<br />
 				- Calling {searchToolName} again for a tool that was already returned by a previous search<br />
-				- Retrying {searchToolName} repeatedly if it fails or returns no results. If a search returns no matching tools, the tool is not available. Do NOT retry with different patterns — inform the user that the tool or MCP server is unavailable and stop.<br />
+				- Retrying {searchToolName} repeatedly if it fails or returns no results. If a search returns no matching tools, the tool is not available. Do not retry with different patterns.<br />
+			</Tag>
+			<br />
+			<Tag name='dynamicToolDiscovery'>
+				MCP servers may add or remove tools dynamically during a conversation via tools/list_changed notifications. If you called a tool that may have enabled new tools on an MCP server, search for the new tools — they may now be discoverable even if not listed in the availableDeferredTools list above.<br />
 			</Tag>
 			<br />
 			<Tag name='availableDeferredTools'>
@@ -493,6 +499,7 @@ class ToolSearchToolPromptOptimized extends PromptElement<ToolSearchToolPromptPr
 	constructor(
 		props: PromptElementProps<ToolSearchToolPromptProps>,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
+		@IToolDeferralService private readonly toolDeferralService: IToolDeferralService,
 	) {
 		super(props);
 	}
@@ -509,7 +516,7 @@ class ToolSearchToolPromptOptimized extends PromptElement<ToolSearchToolPromptPr
 		}
 
 		const deferredTools = this.props.availableTools
-			.filter(tool => !nonDeferredToolNames.has(tool.name))
+			.filter(tool => !this.toolDeferralService.isNonDeferredTool(tool.name))
 			.map(tool => tool.name)
 			.sort();
 

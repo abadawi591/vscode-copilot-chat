@@ -68,7 +68,6 @@ export interface IDefaultIntentRequestHandlerOptions {
 	confirmOnMaxToolIterations?: boolean;
 	temperature?: number;
 	overrideRequestLocation?: ChatLocation;
-	hideRateLimitTimeEstimate?: boolean;
 }
 
 /*
@@ -142,8 +141,6 @@ export class DefaultIntentRequestHandler {
 			const capturingToken = new CapturingToken(
 				this.request.prompt,
 				'comment',
-				false,
-				false,
 				this.request.subAgentInvocationId,
 				this.request.subAgentName,
 				// For subagents, use invocation ID as chatSessionId so spans get their own log file
@@ -505,7 +502,7 @@ export class DefaultIntentRequestHandler {
 			case ChatFetchResponseType.QuotaExceeded:
 			case ChatFetchResponseType.RateLimited: {
 				const outageStatus = await this._octoKitService.getGitHubOutageStatus();
-				const errorDetails = getErrorDetailsFromChatFetchError(fetchResult, (await this._authenticationService.getCopilotToken()).copilotPlan, outageStatus, this.handlerOptions.hideRateLimitTimeEstimate);
+				const errorDetails = getErrorDetailsFromChatFetchError(fetchResult, (await this._authenticationService.getCopilotToken()).copilotPlan, outageStatus);
 				if (fetchResult.type === ChatFetchResponseType.RateLimited
 					&& fetchResult.capiError?.code?.startsWith('user_model_rate_limited')
 					&& !fetchResult.isAuto) {
@@ -694,8 +691,11 @@ class DefaultToolCallingLoop extends ToolCallingLoop<IDefaultToolLoopOptions> {
 		const debugName = this.options.request.subAgentInvocationId ?
 			`tool/runSubagent${this.options.request.subAgentName ? `-${this.options.request.subAgentName}` : ''}` :
 			`${ChatLocation.toStringShorter(this.options.location)}/${this.options.intent?.id}`;
+		const location = this.options.overrideRequestLocation ?? this.options.location;
+		const isThinkingLocation = location === ChatLocation.Agent || location === ChatLocation.MessagesProxy;
 		return this.options.invocation.endpoint.makeChatRequest2({
 			...opts,
+			enableThinking: isThinkingLocation && opts.enableThinking,
 			debugName,
 			conversationId: this.options.conversation.sessionId,
 			turnId: opts.turnId,
@@ -703,7 +703,7 @@ class DefaultToolCallingLoop extends ToolCallingLoop<IDefaultToolLoopOptions> {
 				this.telemetry.markReceivedToken();
 				return opts.finishedCb!(text, index, delta);
 			},
-			location: this.options.overrideRequestLocation ?? this.options.location,
+			location,
 			requestOptions: {
 				...opts.requestOptions,
 				tools: normalizeToolSchema(

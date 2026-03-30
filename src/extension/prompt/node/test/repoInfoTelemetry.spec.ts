@@ -94,6 +94,7 @@ suite('RepoInfoTelemetry', () => {
 			diffIndexWithHEADShortStats: vi.fn(),
 			fetch: vi.fn(),
 			getMergeBase: vi.fn(),
+			restore: vi.fn(),
 			add: vi.fn(),
 			createWorktree: vi.fn(),
 			deleteWorktree: vi.fn(),
@@ -106,6 +107,7 @@ suite('RepoInfoTelemetry', () => {
 			getRefs: vi.fn(),
 			isBranchProtected: vi.fn(),
 			push: vi.fn(),
+			exec: vi.fn(),
 			dispose: vi.fn()
 		};
 		services.define(IGitService, mockGitService);
