@@ -12,7 +12,6 @@ import { findLast } from '../../../util/vs/base/common/arraysFind';
 import { SequencerByKey, ThrottledDelayer } from '../../../util/vs/base/common/async';
 import { Lazy } from '../../../util/vs/base/common/lazy';
 import { Disposable } from '../../../util/vs/base/common/lifecycle';
-import { ResourceMap } from '../../../util/vs/base/common/map';
 import { dirname, isEqual } from '../../../util/vs/base/common/resources';
 import { ChatSessionMetadataFile, IChatSessionMetadataStore, RequestDetails, WorkspaceFolderEntry } from '../common/chatSessionMetadataStore';
 import { ChatSessionWorktreeData, ChatSessionWorktreeProperties } from '../common/chatSessionWorktreeService';
@@ -237,16 +236,12 @@ export class ChatSessionMetadataStore extends Disposable implements IChatSession
 		return metadata.workspaceFolder?.folderPath ? Uri.file(metadata.workspaceFolder.folderPath) : undefined;
 	}
 
-	async getUsedWorkspaceFolders(): Promise<WorkspaceFolderEntry[]> {
-		await this._intialize.value;
-		const entries = new ResourceMap<number>();
-		for (const metadata of Object.values(this._cache)) {
-			if (metadata.workspaceFolder?.folderPath) {
-				const folderUri = Uri.file(metadata.workspaceFolder.folderPath);
-				entries.set(folderUri, Math.max(entries.get(folderUri) ?? 0, metadata.workspaceFolder.timestamp));
-			}
+	async getSessionWorkspaceFolderEntry(sessionId: string): Promise<WorkspaceFolderEntry | undefined> {
+		const metadata = await this.getSessionMetadata(sessionId);
+		if (!metadata) {
+			return undefined;
 		}
-		return Array.from(entries.entries()).map(([folderUri, timestamp]) => ({ folderPath: folderUri.fsPath, timestamp }));
+		return metadata.workspaceFolder;
 	}
 
 	async getAdditionalWorkspaces(sessionId: string): Promise<IWorkspaceInfo[]> {

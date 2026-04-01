@@ -5,6 +5,7 @@
 
 import type * as vscode from 'vscode';
 import { createServiceIdentifier } from '../../../util/common/services';
+import { WorkspaceFolderEntry } from './chatSessionMetadataStore';
 import { ChatSessionWorktreeFile } from './chatSessionWorktreeService';
 
 export const IChatSessionWorkspaceFolderService = createServiceIdentifier<IChatSessionWorkspaceFolderService>('IChatSessionWorkspaceFolderService');
@@ -16,21 +17,21 @@ export const IChatSessionWorkspaceFolderService = createServiceIdentifier<IChatS
  */
 export interface IChatSessionWorkspaceFolderService {
 	readonly _serviceBrand: undefined;
-	getRecentFolders(): Promise<{ folder: vscode.Uri; lastAccessTime: number }[]>;
-	/**
-	 * Delete a recent folder from all tracked sessions.
-	 */
-	deleteRecentFolder(folder: vscode.Uri): Promise<void>;
 	deleteTrackedWorkspaceFolder(sessionId: string): Promise<void>;
 	/**
 	 * Track workspace folder selection for a session (for folders without git repos in multi-root workspaces)
 	 */
-	trackSessionWorkspaceFolder(sessionId: string, workspaceFolderUri: string): Promise<void>;
+	trackSessionWorkspaceFolder(sessionId: string, workspaceFolderUri: string, repositoryFolderUri?: string): Promise<void>;
 
 	/**
 	 * Get the workspace folder associated with a session (if a workspace folder without git repo was selected)
 	 */
 	getSessionWorkspaceFolder(sessionId: string): Promise<vscode.Uri | undefined>;
+
+	/**
+	 * Get the workspace folder entry associated with a session (if a workspace folder without git repo was selected)
+	 */
+	getSessionWorkspaceFolderEntry(sessionId: string): Promise<WorkspaceFolderEntry | undefined>;
 
 	/**
 	 * Handle the completion of a request for a session.

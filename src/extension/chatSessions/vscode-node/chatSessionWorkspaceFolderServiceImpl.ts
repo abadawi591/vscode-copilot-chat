@@ -10,12 +10,10 @@ import { IGitService } from '../../../platform/git/common/gitService';
 import { parseGitChangesRaw } from '../../../platform/git/vscode-node/utils';
 import { DiffChange } from '../../../platform/git/vscode/git';
 import { ILogService } from '../../../platform/log/common/logService';
-import { coalesce } from '../../../util/vs/base/common/arrays';
 import { SequencerByKey } from '../../../util/vs/base/common/async';
 import { Disposable } from '../../../util/vs/base/common/lifecycle';
-import { ResourceMap, ResourceSet } from '../../../util/vs/base/common/map';
+import { ResourceMap } from '../../../util/vs/base/common/map';
 import * as path from '../../../util/vs/base/common/path';
-import { isEqual } from '../../../util/vs/base/common/resources';
 import { generateUuid } from '../../../util/vs/base/common/uuid';
 import { IChatSessionMetadataStore, WorkspaceFolderEntry } from '../common/chatSessionMetadataStore';
 import { IChatSessionWorkspaceFolderService } from '../common/chatSessionWorkspaceFolderService';
@@ -28,10 +26,10 @@ import { ChatSessionWorktreeFile } from '../common/chatSessionWorktreeService';
 export class ChatSessionWorkspaceFolderService extends Disposable implements IChatSessionWorkspaceFolderService {
 	declare _serviceBrand: undefined;
 
+	private static readonly EMPTY_TREE_OBJECT = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
 	private readonly workspaceFolderChanges = new ResourceMap<ChatSessionWorktreeFile[]>();
 	private readonly workspaceState = new Map<string, WorkspaceFolderEntry>();
-	private recentFolders: { folder: vscode.Uri; lastAccessTime: number }[] = [];
-	private readonly deletedFolders = new ResourceSet();
 	private readonly workspaceChangesSequencer = new SequencerByKey<string>();
 
 	constructor(
@@ -43,36 +41,15 @@ export class ChatSessionWorkspaceFolderService extends Disposable implements ICh
 		super();
 	}
 
-	public async deleteRecentFolder(folder: vscode.Uri): Promise<void> {
-		this.recentFolders = this.recentFolders.filter(entry => !isEqual(entry.folder, folder));
-		this.deletedFolders.add(folder);
-	}
-
-	public async getRecentFolders(): Promise<{ folder: vscode.Uri; lastAccessTime: number }[]> {
-		const items = await this.metadataStore.getUsedWorkspaceFolders();
-		this.recentFolders = coalesce(items.map(item => {
-			if (!item.folderPath) {
-				return;
-			}
-			const folder = vscode.Uri.file(item.folderPath);
-			if (this.deletedFolders.has(folder)) {
-				return;
-			}
-			return {
-				folder,
-				lastAccessTime: item.timestamp
-			};
-		})).sort((a, b) => b.lastAccessTime - a.lastAccessTime);
-		return this.recentFolders;
-	}
 	async deleteTrackedWorkspaceFolder(sessionId: string): Promise<void> {
 		this.workspaceState.delete(sessionId);
 		await this.metadataStore.deleteSessionMetadata(sessionId);
 	}
 
-	async trackSessionWorkspaceFolder(sessionId: string, workspaceFolderUri: string): Promise<void> {
+	async trackSessionWorkspaceFolder(sessionId: string, workspaceFolderUri: string, repositoryFolderUri?: string): Promise<void> {
 		const entry: WorkspaceFolderEntry = {
 			folderPath: workspaceFolderUri,
+			repositoryPath: repositoryFolderUri,
 			timestamp: Date.now()
 		};
 		this.workspaceState.set(sessionId, entry);
@@ -86,6 +63,14 @@ export class ChatSessionWorkspaceFolderService extends Disposable implements ICh
 			return vscode.Uri.file(entry.folderPath);
 		}
 		return await this.metadataStore.getSessionWorkspaceFolder(sessionId);
+	}
+
+	async getSessionWorkspaceFolderEntry(sessionId: string): Promise<WorkspaceFolderEntry | undefined> {
+		const entry = this.workspaceState.get(sessionId);
+		if (entry) {
+			return entry;
+		}
+		return await this.metadataStore.getSessionWorkspaceFolderEntry(sessionId);
 	}
 
 	async handleRequestCompleted(workspaceFolderUri: vscode.Uri): Promise<void> {
@@ -123,8 +108,13 @@ export class ChatSessionWorkspaceFolderService extends Disposable implements ICh
 					// Create temp index file directory
 					await fs.mkdir(path.dirname(diffIndexFile), { recursive: true });
 
-					// Populate temp index from HEAD
-					await this.gitService.exec(repository.rootUri, ['read-tree', 'HEAD'], { GIT_INDEX_FILE: diffIndexFile });
+					try {
+						// Populate temp index from HEAD, fall back to empty tree if no commits exist
+						await this.gitService.exec(repository.rootUri, ['read-tree', 'HEAD'], { GIT_INDEX_FILE: diffIndexFile });
+					} catch {
+						// Fall back to empty tree for repositories with no commits
+						await this.gitService.exec(repository.rootUri, ['read-tree', ChatSessionWorkspaceFolderService.EMPTY_TREE_OBJECT], { GIT_INDEX_FILE: diffIndexFile });
+					}
 
 					// Stage entire working directory into temp index
 					await this.gitService.exec(repository.rootUri, ['add', '-A', '--', '.'], { GIT_INDEX_FILE: diffIndexFile });
