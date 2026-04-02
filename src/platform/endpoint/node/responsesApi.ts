@@ -49,7 +49,7 @@ export function createResponsesRequestBody(accessor: ServicesAccessor, options: 
 
 	const body: IEndpointBody = {
 		model,
-		...rawMessagesToResponseAPI(model, options.messages, !!options.ignoreStatefulMarker, !!options.useWebSocket, compactThreshold !== undefined),
+		...rawMessagesToResponseAPI(model, options.messages, !!options.ignoreStatefulMarker, compactThreshold !== undefined),
 		stream: true,
 		tools: options.requestOptions?.tools?.map((tool): OpenAI.Responses.FunctionTool & OpenAiResponsesFunctionTool => ({
 			...tool.function,
@@ -124,7 +124,7 @@ interface ResponseOutputItemWithPhase {
 	phase?: string;
 }
 
-function rawMessagesToResponseAPI(modelId: string, messages: readonly Raw.ChatMessage[], ignoreStatefulMarker: boolean, useWebSocket: boolean, compactionEnabled: boolean): { input: OpenAI.Responses.ResponseInputItem[]; previous_response_id?: string } {
+function rawMessagesToResponseAPI(modelId: string, messages: readonly Raw.ChatMessage[], ignoreStatefulMarker: boolean, compactionEnabled: boolean): { input: OpenAI.Responses.ResponseInputItem[]; previous_response_id?: string } {
 	const latestCompactionMessageIndex = getLatestCompactionMessageIndex(messages);
 	const statefulMarkerAndIndex = !ignoreStatefulMarker && getStatefulMarkerAndIndex(modelId, messages);
 
@@ -132,7 +132,7 @@ function rawMessagesToResponseAPI(modelId: string, messages: readonly Raw.ChatMe
 	if (statefulMarkerAndIndex) {
 		previousResponseId = statefulMarkerAndIndex.statefulMarker;
 		// this for BYOK scenarios where currently gpt5.3+ models are not yet supported.
-		if ((!useWebSocket || !compactionEnabled) && latestCompactionMessageIndex === undefined) {
+		if (!compactionEnabled) {
 			messages = messages.slice(statefulMarkerAndIndex.index + 1);
 		}
 	}

@@ -8,7 +8,6 @@ import type { OpenAI } from 'openai';
 import { describe, expect, it } from 'vitest';
 import { TokenizerType } from '../../../../util/common/tokenizer';
 import { IInstantiationService } from '../../../../util/vs/platform/instantiation/common/instantiation';
-import { ConfigKey, IConfigurationService } from '../../../configuration/common/configurationService';
 import { ILogService } from '../../../log/common/logService';
 import { IChatEndpoint, ICreateEndpointBodyOptions } from '../../../networking/common/networking';
 import { openAIContextManagementCompactionType } from '../../../networking/common/openai';
@@ -286,48 +285,6 @@ describe('createResponsesRequestBody', () => {
 				compact_threshold: 1234,
 			}]
 		})).toBe(1234);
-	});
-
-	it('does not slice messages by stateful marker index for websocket requests', () => {
-		const services = createPlatformServices();
-		const accessor = services.createTestingAccessor();
-		const instantiationService = accessor.get(IInstantiationService);
-		accessor.get(IConfigurationService).setConfig(ConfigKey.ResponsesApiContextManagementEnabled, true);
-		const messages: Raw.ChatMessage[] = [
-			{
-				role: Raw.ChatRole.User,
-				content: [{ type: Raw.ChatCompletionContentPartKind.Text, text: 'before marker' }],
-			},
-			createStatefulMarkerMessage(testEndpoint.model, 'resp-prev'),
-			{
-				role: Raw.ChatRole.User,
-				content: [{ type: Raw.ChatCompletionContentPartKind.Text, text: 'after marker' }],
-			},
-		];
-
-		const httpBody = instantiationService.invokeFunction(servicesAccessor => createResponsesRequestBody(servicesAccessor, createRequestOptions(messages, false), testEndpoint.model, testEndpoint));
-		const webSocketBody = instantiationService.invokeFunction(servicesAccessor => createResponsesRequestBody(servicesAccessor, createRequestOptions(messages, true), testEndpoint.model, testEndpoint));
-
-		expect(httpBody.previous_response_id).toBe('resp-prev');
-		expect(httpBody.input).toHaveLength(1);
-		expect(httpBody.input?.[0]).toMatchObject({
-			role: 'user',
-			content: [{ type: 'input_text', text: 'after marker' }],
-		});
-
-		expect(webSocketBody.previous_response_id).toBe('resp-prev');
-		expect(webSocketBody.input).toHaveLength(2);
-		expect(webSocketBody.input?.[0]).toMatchObject({
-			role: 'user',
-			content: [{ type: 'input_text', text: 'before marker' }],
-		});
-		expect(webSocketBody.input?.[1]).toMatchObject({
-			role: 'user',
-			content: [{ type: 'input_text', text: 'after marker' }],
-		});
-
-		accessor.dispose();
-		services.dispose();
 	});
 
 	it('still slices websocket requests by stateful marker index when compaction is disabled', () => {
