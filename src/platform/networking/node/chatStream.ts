@@ -465,7 +465,6 @@ export function sendResponsesApiCompactionTelemetry(
 		headerRequestId: string;
 		gitHubRequestId: string;
 		model: string;
-		outputTypes?: string;
 	},
 	measurements: {
 		compactThreshold?: number;
@@ -481,7 +480,6 @@ export function sendResponsesApiCompactionTelemetry(
 			"headerRequestId": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "comment": "Request ID from the response headers." },
 			"gitHubRequestId": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "comment": "GitHub request ID from the response headers if present." },
 			"model": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "comment": "Model family reported by the response." },
-			"outputTypes": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "comment": "Comma-separated response output item types when no compaction item was returned." },
 			"compactThreshold": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "isMeasurement": true, "comment": "Compaction threshold configured for the request." },
 			"promptTokens": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "isMeasurement": true, "comment": "Prompt token count reported by the response." },
 			"totalTokens": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "isMeasurement": true, "comment": "Total token count reported by the response." }
@@ -492,7 +490,6 @@ export function sendResponsesApiCompactionTelemetry(
 		headerRequestId: properties.headerRequestId,
 		gitHubRequestId: properties.gitHubRequestId,
 		model: properties.model,
-		outputTypes: properties.outputTypes,
 	}, {
 		compactThreshold: measurements.compactThreshold,
 		promptTokens: measurements.promptTokens,

@@ -554,7 +554,6 @@ describe('processResponseFromChatEndpoint telemetry', () => {
 		expect(event?.properties).toMatchObject({
 			outcome: 'threshold_met_no_compaction',
 			model: 'gpt-5-mini',
-			outputTypes: 'message',
 		});
 		expect(event?.measurements).toMatchObject({
 			compactThreshold: 1000,

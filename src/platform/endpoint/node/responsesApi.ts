@@ -131,7 +131,6 @@ function rawMessagesToResponseAPI(modelId: string, messages: readonly Raw.ChatMe
 	let previousResponseId: string | undefined;
 	if (statefulMarkerAndIndex) {
 		previousResponseId = statefulMarkerAndIndex.statefulMarker;
-		// this for BYOK scenarios where currently gpt5.3+ models are not yet supported.
 		if (!compactionEnabled) {
 			messages = messages.slice(statefulMarkerAndIndex.index + 1);
 		}
@@ -457,7 +456,7 @@ export async function processResponseFromChatEndpoint(instantiationService: IIns
 	return new AsyncIterableObject<ChatCompletion>(async feed => {
 		const requestId = response.headers.get('X-Request-ID') ?? generateUuid();
 		const ghRequestId = response.headers.get('x-github-request-id') ?? '';
-		const processor = instantiationService.createInstance(OpenAIResponsesProcessor, telemetryData, telemetryService, requestId, ghRequestId, (message: string) => logService.info(message), compactionThreshold);
+		const processor = instantiationService.createInstance(OpenAIResponsesProcessor, telemetryData, telemetryService, requestId, ghRequestId, compactionThreshold);
 		const parser = new SSEParser((ev) => {
 			try {
 				logService.trace(`SSE: ${ev.data}`);
@@ -500,7 +499,6 @@ export class OpenAIResponsesProcessor {
 	private textAccumulator: string = '';
 	private hasReceivedReasoningSummary = false;
 	private sawCompactionMessage = false;
-	private compactionMessageId: string | undefined;
 	/** Maps output_index to { name, callId, arguments } for streaming tool call updates */
 	private readonly toolCallInfo = new Map<number, { name: string; callId: string; arguments: string }>();
 
@@ -509,8 +507,8 @@ export class OpenAIResponsesProcessor {
 		private readonly telemetryService: ITelemetryService,
 		private readonly requestId: string,
 		private readonly ghRequestId: string,
-		private readonly logInfo: (message: string) => void,
-		private readonly compactionThreshold?: number,
+		private readonly compactionThreshold: number | undefined,
+		@ILogService private readonly logService: ILogService,
 	) { }
 
 	public push(chunk: OpenAI.Responses.ResponseStreamEvent, _onProgress: FinishedCallback): ChatCompletion | undefined {
@@ -563,7 +561,6 @@ export class OpenAIResponsesProcessor {
 				if (chunk.item.type.toString() === openAIContextManagementCompactionType) {
 					const compactionItem = chunk.item as unknown as OpenAIContextManagementResponse;
 					this.sawCompactionMessage = true;
-					this.compactionMessageId = compactionItem.id;
 					return onProgress({
 						text: '',
 						contextManagement: {
@@ -632,21 +629,19 @@ export class OpenAIResponsesProcessor {
 						promptTokens: chunk.response.usage?.input_tokens ?? 0,
 						totalTokens: chunk.response.usage?.total_tokens ?? 0,
 					});
-					this.logInfo(`[responsesAPI_compaction] OpenAI returned compaction item. headerRequestId=${this.requestId} ghRequestId=${this.ghRequestId || 'unknown'} completionId=${chunk.response.id} createdAt=${chunk.response.created_at} compactionMessageId=${this.compactionMessageId ?? 'unknown'} compactThreshold=${this.compactionThreshold ?? -1} promptTokens=${chunk.response.usage?.input_tokens ?? 0} totalTokens=${chunk.response.usage?.total_tokens ?? 0}`);
+					this.logService.debug(`[responsesAPI_compaction] Compaction enabled. headerRequestId=${this.requestId}`);
 				} else if (this.compactionThreshold !== undefined && (chunk.response.usage?.input_tokens ?? 0) >= this.compactionThreshold) {
-					const outputTypes = chunk.response.output.map(item => item.type).join(',');
 					sendResponsesApiCompactionTelemetry(this.telemetryService, {
 						outcome: 'threshold_met_no_compaction',
 						headerRequestId: this.requestId,
 						gitHubRequestId: this.ghRequestId,
 						model: chunk.response.model,
-						outputTypes: outputTypes || 'none',
 					}, {
 						compactThreshold: this.compactionThreshold,
 						promptTokens: chunk.response.usage?.input_tokens ?? 0,
 						totalTokens: chunk.response.usage?.total_tokens ?? 0,
 					});
-					this.logInfo(`[responsesAPI_compaction] Context management is enabled and compact threshold was met, but no compaction item was returned in the response output. headerRequestId=${this.requestId} ghRequestId=${this.ghRequestId || 'unknown'} completionId=${chunk.response.id} createdAt=${chunk.response.created_at} compactThreshold=${this.compactionThreshold} promptTokens=${chunk.response.usage?.input_tokens ?? 0} totalTokens=${chunk.response.usage?.total_tokens ?? 0} outputTypes=${outputTypes || 'none'}`);
+					this.logService.debug(`[responsesAPI_compaction] Compaction enabled but context not compacted after threshold was met. headerRequestId=${this.requestId}`);
 				}
 				onProgress({ text: '', statefulMarker: chunk.response.id });
 				return {
