@@ -19,7 +19,7 @@ import { ILogService } from '../../log/common/logService';
 import { FinishedCallback, IResponseDelta, OpenAiResponsesFunctionTool } from '../../networking/common/fetch';
 import { IChatEndpoint, ICreateEndpointBodyOptions, IEndpointBody } from '../../networking/common/networking';
 import { ChatCompletion, FinishedCompletionReason, modelsWithoutResponsesContextManagement, openAIContextManagementCompactionType, OpenAIContextManagementResponse, rawMessageToCAPI, TokenLogProb } from '../../networking/common/openai';
-import { sendEngineMessagesTelemetry } from '../../networking/node/chatStream';
+import { sendEngineMessagesTelemetry, sendResponsesApiCompactionTelemetry } from '../../networking/node/chatStream';
 import { IExperimentationService } from '../../telemetry/common/nullExperimentationService';
 import { ITelemetryService } from '../../telemetry/common/telemetry';
 import { TelemetryData } from '../../telemetry/common/telemetryData';
@@ -35,22 +35,21 @@ export function getResponsesApiCompactionThreshold(configService: IConfiguration
 		return undefined;
 	}
 
-	return 1000;
-
-	// return endpoint.modelMaxPromptTokens > 0
-	// 	? Math.floor(endpoint.modelMaxPromptTokens * 0.9)
-	// 	: 50000;
+	return endpoint.modelMaxPromptTokens > 0
+		? Math.floor(endpoint.modelMaxPromptTokens * 0.9)
+		: 50000;
 }
 
 export function createResponsesRequestBody(accessor: ServicesAccessor, options: ICreateEndpointBodyOptions, model: string, endpoint: IChatEndpoint): IEndpointBody {
 	const configService = accessor.get(IConfigurationService);
 	const expService = accessor.get(IExperimentationService);
 	const verbosity = getVerbosityForModelSync(endpoint);
+	const compactThreshold = getResponsesApiCompactionThreshold(configService, expService, endpoint);
 	// compaction supported for all the models but works well for codex models and any future models after 5.3
 
 	const body: IEndpointBody = {
 		model,
-		...rawMessagesToResponseAPI(model, options.messages, !!options.ignoreStatefulMarker),
+		...rawMessagesToResponseAPI(model, options.messages, !!options.ignoreStatefulMarker, !!options.useWebSocket, compactThreshold !== undefined),
 		stream: true,
 		tools: options.requestOptions?.tools?.map((tool): OpenAI.Responses.FunctionTool & OpenAiResponsesFunctionTool => ({
 			...tool.function,
@@ -69,7 +68,6 @@ export function createResponsesRequestBody(accessor: ServicesAccessor, options: 
 		text: verbosity ? { verbosity } : undefined,
 	};
 
-	const compactThreshold = getResponsesApiCompactionThreshold(configService, expService, endpoint);
 	if (compactThreshold !== undefined) {
 		body.context_management = [{
 			'type': openAIContextManagementCompactionType,
@@ -103,6 +101,21 @@ export function createResponsesRequestBody(accessor: ServicesAccessor, options: 
 	return body;
 }
 
+export function getResponsesApiCompactionThresholdFromBody(body: Pick<IEndpointBody, 'context_management'>): number | undefined {
+	const contextManagement = body.context_management;
+	if (!Array.isArray(contextManagement)) {
+		return undefined;
+	}
+
+	for (const item of contextManagement) {
+		if (item.type === openAIContextManagementCompactionType && typeof item.compact_threshold === 'number') {
+			return item.compact_threshold;
+		}
+	}
+
+	return undefined;
+}
+
 type ResponseOutputMessageWithPhase = OpenAI.Responses.ResponseOutputMessage & {
 	phase?: string;
 };
@@ -111,19 +124,21 @@ interface ResponseOutputItemWithPhase {
 	phase?: string;
 }
 
-function rawMessagesToResponseAPI(modelId: string, messages: readonly Raw.ChatMessage[], ignoreStatefulMarker: boolean): { input: OpenAI.Responses.ResponseInputItem[]; previous_response_id?: string } {
+function rawMessagesToResponseAPI(modelId: string, messages: readonly Raw.ChatMessage[], ignoreStatefulMarker: boolean, useWebSocket: boolean, compactionEnabled: boolean): { input: OpenAI.Responses.ResponseInputItem[]; previous_response_id?: string } {
 	const latestCompactionMessageIndex = getLatestCompactionMessageIndex(messages);
-	if (latestCompactionMessageIndex !== undefined) {
-		messages = messages.slice(latestCompactionMessageIndex);
-	}
-
 	const statefulMarkerAndIndex = !ignoreStatefulMarker && getStatefulMarkerAndIndex(modelId, messages);
+
 	let previousResponseId: string | undefined;
 	if (statefulMarkerAndIndex) {
 		previousResponseId = statefulMarkerAndIndex.statefulMarker;
-		if (latestCompactionMessageIndex === undefined) {
+		// this for BYOK scenarios where currently gpt5.3+ models are not yet supported.
+		if ((!useWebSocket || !compactionEnabled) && latestCompactionMessageIndex === undefined) {
 			messages = messages.slice(statefulMarkerAndIndex.index + 1);
 		}
+	}
+
+	if (latestCompactionMessageIndex !== undefined) {
+		messages = messages.slice(latestCompactionMessageIndex);
 	}
 
 	const input: OpenAI.Responses.ResponseInputItem[] = [];
@@ -442,7 +457,7 @@ export async function processResponseFromChatEndpoint(instantiationService: IIns
 	return new AsyncIterableObject<ChatCompletion>(async feed => {
 		const requestId = response.headers.get('X-Request-ID') ?? generateUuid();
 		const ghRequestId = response.headers.get('x-github-request-id') ?? '';
-		const processor = instantiationService.createInstance(OpenAIResponsesProcessor, telemetryData, requestId, ghRequestId, (message: string) => logService.info(message), compactionThreshold);
+		const processor = instantiationService.createInstance(OpenAIResponsesProcessor, telemetryData, telemetryService, requestId, ghRequestId, (message: string) => logService.info(message), compactionThreshold);
 		const parser = new SSEParser((ev) => {
 			try {
 				logService.trace(`SSE: ${ev.data}`);
@@ -491,6 +506,7 @@ export class OpenAIResponsesProcessor {
 
 	constructor(
 		private readonly telemetryData: TelemetryData,
+		private readonly telemetryService: ITelemetryService,
 		private readonly requestId: string,
 		private readonly ghRequestId: string,
 		private readonly logInfo: (message: string) => void,
@@ -605,10 +621,31 @@ export class OpenAIResponsesProcessor {
 					}
 				});
 			case 'response.completed':
-				if (this.sawCompactionMessage) {
+				if (this.compactionThreshold !== undefined && this.sawCompactionMessage) {
+					sendResponsesApiCompactionTelemetry(this.telemetryService, {
+						outcome: 'compaction_returned',
+						headerRequestId: this.requestId,
+						gitHubRequestId: this.ghRequestId,
+						model: chunk.response.model,
+					}, {
+						compactThreshold: this.compactionThreshold,
+						promptTokens: chunk.response.usage?.input_tokens ?? 0,
+						totalTokens: chunk.response.usage?.total_tokens ?? 0,
+					});
 					this.logInfo(`[responsesAPI_compaction] OpenAI returned compaction item. headerRequestId=${this.requestId} ghRequestId=${this.ghRequestId || 'unknown'} completionId=${chunk.response.id} createdAt=${chunk.response.created_at} compactionMessageId=${this.compactionMessageId ?? 'unknown'} compactThreshold=${this.compactionThreshold ?? -1} promptTokens=${chunk.response.usage?.input_tokens ?? 0} totalTokens=${chunk.response.usage?.total_tokens ?? 0}`);
 				} else if (this.compactionThreshold !== undefined && (chunk.response.usage?.input_tokens ?? 0) >= this.compactionThreshold) {
 					const outputTypes = chunk.response.output.map(item => item.type).join(',');
+					sendResponsesApiCompactionTelemetry(this.telemetryService, {
+						outcome: 'threshold_met_no_compaction',
+						headerRequestId: this.requestId,
+						gitHubRequestId: this.ghRequestId,
+						model: chunk.response.model,
+						outputTypes: outputTypes || 'none',
+					}, {
+						compactThreshold: this.compactionThreshold,
+						promptTokens: chunk.response.usage?.input_tokens ?? 0,
+						totalTokens: chunk.response.usage?.total_tokens ?? 0,
+					});
 					this.logInfo(`[responsesAPI_compaction] Context management is enabled and compact threshold was met, but no compaction item was returned in the response output. headerRequestId=${this.requestId} ghRequestId=${this.ghRequestId || 'unknown'} completionId=${chunk.response.id} createdAt=${chunk.response.created_at} compactThreshold=${this.compactionThreshold} promptTokens=${chunk.response.usage?.input_tokens ?? 0} totalTokens=${chunk.response.usage?.total_tokens ?? 0} outputTypes=${outputTypes || 'none'}`);
 				}
 				onProgress({ text: '', statefulMarker: chunk.response.id });

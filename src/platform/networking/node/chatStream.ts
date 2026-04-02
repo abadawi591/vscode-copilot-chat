@@ -458,6 +458,48 @@ export function sendEngineMessagesTelemetry(telemetryService: ITelemetryService,
 	sendEngineMessagesLengthTelemetry(telemetryService, messages, telemetryData, isOutput, logService);
 }
 
+export function sendResponsesApiCompactionTelemetry(
+	telemetryService: ITelemetryService,
+	properties: {
+		outcome: 'compaction_returned' | 'threshold_met_no_compaction';
+		headerRequestId: string;
+		gitHubRequestId: string;
+		model: string;
+		outputTypes?: string;
+	},
+	measurements: {
+		compactThreshold?: number;
+		promptTokens: number;
+		totalTokens: number;
+	}
+): void {
+	/* __GDPR__
+		"responsesApi.compactionOutcome" : {
+			"owner": "dileepy",
+			"comment": "Tracks server-side Responses API compaction outcomes.",
+			"outcome": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "comment": "Whether the server returned a compaction item or exceeded the threshold without returning one." },
+			"headerRequestId": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "comment": "Request ID from the response headers." },
+			"gitHubRequestId": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "comment": "GitHub request ID from the response headers if present." },
+			"model": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "comment": "Model family reported by the response." },
+			"outputTypes": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "comment": "Comma-separated response output item types when no compaction item was returned." },
+			"compactThreshold": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "isMeasurement": true, "comment": "Compaction threshold configured for the request." },
+			"promptTokens": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "isMeasurement": true, "comment": "Prompt token count reported by the response." },
+			"totalTokens": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "isMeasurement": true, "comment": "Total token count reported by the response." }
+		}
+	*/
+	telemetryService.sendGHTelemetryEvent('responsesApi.compactionOutcome', {
+		outcome: properties.outcome,
+		headerRequestId: properties.headerRequestId,
+		gitHubRequestId: properties.gitHubRequestId,
+		model: properties.model,
+		outputTypes: properties.outputTypes,
+	}, {
+		compactThreshold: measurements.compactThreshold,
+		promptTokens: measurements.promptTokens,
+		totalTokens: measurements.totalTokens,
+	});
+}
+
 export function prepareChatCompletionForReturn(
 	telemetryService: ITelemetryService,
 	logService: ILogService,

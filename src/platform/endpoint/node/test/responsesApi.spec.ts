@@ -6,13 +6,77 @@
 import { Raw } from '@vscode/prompt-tsx';
 import type { OpenAI } from 'openai';
 import { describe, expect, it } from 'vitest';
+import { TokenizerType } from '../../../../util/common/tokenizer';
 import { IInstantiationService } from '../../../../util/vs/platform/instantiation/common/instantiation';
+import { ConfigKey, IConfigurationService } from '../../../configuration/common/configurationService';
 import { ILogService } from '../../../log/common/logService';
+import { IChatEndpoint, ICreateEndpointBodyOptions } from '../../../networking/common/networking';
+import { openAIContextManagementCompactionType } from '../../../networking/common/openai';
 import { TelemetryData } from '../../../telemetry/common/telemetryData';
 import { SpyingTelemetryService } from '../../../telemetry/node/spyingTelemetryService';
 import { createFakeStreamResponse } from '../../../test/node/fetcher';
 import { createPlatformServices } from '../../../test/node/services';
-import { processResponseFromChatEndpoint, responseApiInputToRawMessagesForLogging } from '../responsesApi';
+import { CustomDataPartMimeTypes } from '../../common/endpointTypes';
+import { createResponsesRequestBody, getResponsesApiCompactionThresholdFromBody, processResponseFromChatEndpoint, responseApiInputToRawMessagesForLogging } from '../responsesApi';
+
+const testEndpoint: IChatEndpoint = {
+	urlOrRequestMetadata: 'https://example.test/chat',
+	modelMaxPromptTokens: 128000,
+	name: 'Test Endpoint',
+	version: '1',
+	family: 'gpt-5-mini',
+	tokenizer: TokenizerType.O200K,
+	maxOutputTokens: 4096,
+	model: 'gpt-5-mini',
+	modelProvider: 'openai',
+	supportsToolCalls: true,
+	supportsVision: true,
+	supportsPrediction: true,
+	showInModelPicker: true,
+	isFallback: false,
+	acquireTokenizer() {
+		throw new Error('Not implemented in test');
+	},
+	async processResponseFromChatEndpoint() {
+		throw new Error('Not implemented in test');
+	},
+	async makeChatRequest() {
+		throw new Error('Not implemented in test');
+	},
+	async makeChatRequest2() {
+		throw new Error('Not implemented in test');
+	},
+	createRequestBody() {
+		throw new Error('Not implemented in test');
+	},
+	cloneWithTokenOverride() {
+		return this;
+	}
+};
+
+const createRequestOptions = (messages: Raw.ChatMessage[], useWebSocket: boolean): ICreateEndpointBodyOptions => ({
+	debugName: 'test',
+	messages,
+	requestId: 'req-1',
+	postOptions: {},
+	finishedCb: undefined,
+	location: undefined as any,
+	useWebSocket,
+});
+
+const createStatefulMarkerMessage = (modelId: string, marker: string): Raw.ChatMessage => ({
+	role: Raw.ChatRole.Assistant,
+	content: [{
+		type: Raw.ChatCompletionContentPartKind.Opaque,
+		value: {
+			type: CustomDataPartMimeTypes.StatefulMarker,
+			value: {
+				modelId,
+				marker,
+			}
+		}
+	}]
+});
 
 describe('responseApiInputToRawMessagesForLogging', () => {
 
@@ -214,6 +278,88 @@ describe('responseApiInputToRawMessagesForLogging', () => {
 	});
 });
 
+describe('createResponsesRequestBody', () => {
+	it('extracts compaction threshold from request body context management', () => {
+		expect(getResponsesApiCompactionThresholdFromBody({
+			context_management: [{
+				type: openAIContextManagementCompactionType,
+				compact_threshold: 1234,
+			}]
+		})).toBe(1234);
+	});
+
+	it('does not slice messages by stateful marker index for websocket requests', () => {
+		const services = createPlatformServices();
+		const accessor = services.createTestingAccessor();
+		const instantiationService = accessor.get(IInstantiationService);
+		accessor.get(IConfigurationService).setConfig(ConfigKey.ResponsesApiContextManagementEnabled, true);
+		const messages: Raw.ChatMessage[] = [
+			{
+				role: Raw.ChatRole.User,
+				content: [{ type: Raw.ChatCompletionContentPartKind.Text, text: 'before marker' }],
+			},
+			createStatefulMarkerMessage(testEndpoint.model, 'resp-prev'),
+			{
+				role: Raw.ChatRole.User,
+				content: [{ type: Raw.ChatCompletionContentPartKind.Text, text: 'after marker' }],
+			},
+		];
+
+		const httpBody = instantiationService.invokeFunction(servicesAccessor => createResponsesRequestBody(servicesAccessor, createRequestOptions(messages, false), testEndpoint.model, testEndpoint));
+		const webSocketBody = instantiationService.invokeFunction(servicesAccessor => createResponsesRequestBody(servicesAccessor, createRequestOptions(messages, true), testEndpoint.model, testEndpoint));
+
+		expect(httpBody.previous_response_id).toBe('resp-prev');
+		expect(httpBody.input).toHaveLength(1);
+		expect(httpBody.input?.[0]).toMatchObject({
+			role: 'user',
+			content: [{ type: 'input_text', text: 'after marker' }],
+		});
+
+		expect(webSocketBody.previous_response_id).toBe('resp-prev');
+		expect(webSocketBody.input).toHaveLength(2);
+		expect(webSocketBody.input?.[0]).toMatchObject({
+			role: 'user',
+			content: [{ type: 'input_text', text: 'before marker' }],
+		});
+		expect(webSocketBody.input?.[1]).toMatchObject({
+			role: 'user',
+			content: [{ type: 'input_text', text: 'after marker' }],
+		});
+
+		accessor.dispose();
+		services.dispose();
+	});
+
+	it('still slices websocket requests by stateful marker index when compaction is disabled', () => {
+		const services = createPlatformServices();
+		const accessor = services.createTestingAccessor();
+		const instantiationService = accessor.get(IInstantiationService);
+		const messages: Raw.ChatMessage[] = [
+			{
+				role: Raw.ChatRole.User,
+				content: [{ type: Raw.ChatCompletionContentPartKind.Text, text: 'before marker' }],
+			},
+			createStatefulMarkerMessage(testEndpoint.model, 'resp-prev'),
+			{
+				role: Raw.ChatRole.User,
+				content: [{ type: Raw.ChatCompletionContentPartKind.Text, text: 'after marker' }],
+			},
+		];
+
+		const webSocketBody = instantiationService.invokeFunction(servicesAccessor => createResponsesRequestBody(servicesAccessor, createRequestOptions(messages, true), testEndpoint.model, testEndpoint));
+
+		expect(webSocketBody.previous_response_id).toBe('resp-prev');
+		expect(webSocketBody.input).toHaveLength(1);
+		expect(webSocketBody.input?.[0]).toMatchObject({
+			role: 'user',
+			content: [{ type: 'input_text', text: 'after marker' }],
+		});
+
+		accessor.dispose();
+		services.dispose();
+	});
+});
+
 describe('processResponseFromChatEndpoint telemetry', () => {
 	it('emits engine.messages for Responses API assistant output', async () => {
 		const services = createPlatformServices();
@@ -269,6 +415,195 @@ describe('processResponseFromChatEndpoint telemetry', () => {
 		expect(messagesJson).toHaveLength(1);
 		expect(messagesJson[0].role).toBe('assistant');
 		expect(messagesJson[0].content).toBe('final assistant reply');
+
+		accessor.dispose();
+		services.dispose();
+	});
+
+	it('does not emit compaction telemetry when compaction is disabled', async () => {
+		const services = createPlatformServices();
+		const accessor = services.createTestingAccessor();
+		const instantiationService = accessor.get(IInstantiationService);
+		const logService = accessor.get(ILogService);
+		const telemetryService = new SpyingTelemetryService();
+
+		const compactionEvent = {
+			type: 'response.output_item.done',
+			output_index: 0,
+			item: {
+				type: openAIContextManagementCompactionType,
+				id: 'cmp_disabled',
+				encrypted_content: 'enc',
+			}
+		};
+		const completedEvent = {
+			type: 'response.completed',
+			response: {
+				id: 'resp_disabled',
+				model: 'gpt-5-mini',
+				created_at: 123,
+				usage: {
+					input_tokens: 1500,
+					output_tokens: 9,
+					total_tokens: 1509,
+					input_tokens_details: { cached_tokens: 0 },
+					output_tokens_details: { reasoning_tokens: 0 },
+				},
+				output: []
+			}
+		};
+
+		const response = createFakeStreamResponse(`data: ${JSON.stringify(compactionEvent)}\n\ndata: ${JSON.stringify(completedEvent)}\n\n`);
+		const telemetryData = TelemetryData.createAndMarkAsIssued({ modelCallId: 'model-call-4' }, {});
+
+		const stream = await processResponseFromChatEndpoint(
+			instantiationService,
+			telemetryService,
+			logService,
+			response,
+			1,
+			async () => undefined,
+			telemetryData,
+			undefined
+		);
+
+		for await (const _ of stream) {
+			// consume stream
+		}
+
+		const event = telemetryService.getEvents().telemetryServiceEvents.find(e => e.eventName === 'responsesApi.compactionOutcome');
+		expect(event).toBeUndefined();
+
+		accessor.dispose();
+		services.dispose();
+	});
+
+	it('emits telemetry when the server returns a compaction item', async () => {
+		const services = createPlatformServices();
+		const accessor = services.createTestingAccessor();
+		const instantiationService = accessor.get(IInstantiationService);
+		const logService = accessor.get(ILogService);
+		const telemetryService = new SpyingTelemetryService();
+
+		const compactionEvent = {
+			type: 'response.output_item.done',
+			output_index: 0,
+			item: {
+				type: openAIContextManagementCompactionType,
+				id: 'cmp_123',
+				encrypted_content: 'enc',
+			}
+		};
+		const completedEvent = {
+			type: 'response.completed',
+			response: {
+				id: 'resp_456',
+				model: 'gpt-5-mini',
+				created_at: 123,
+				usage: {
+					input_tokens: 1200,
+					output_tokens: 7,
+					total_tokens: 1207,
+					input_tokens_details: { cached_tokens: 0 },
+					output_tokens_details: { reasoning_tokens: 0 },
+				},
+				output: []
+			}
+		};
+
+		const response = createFakeStreamResponse(`data: ${JSON.stringify(compactionEvent)}\n\ndata: ${JSON.stringify(completedEvent)}\n\n`);
+		const telemetryData = TelemetryData.createAndMarkAsIssued({ modelCallId: 'model-call-2' }, {});
+
+		const stream = await processResponseFromChatEndpoint(
+			instantiationService,
+			telemetryService,
+			logService,
+			response,
+			1,
+			async () => undefined,
+			telemetryData,
+			1000
+		);
+
+		for await (const _ of stream) {
+			// consume stream
+		}
+
+		const event = telemetryService.getEvents().telemetryServiceEvents.find(e => e.eventName === 'responsesApi.compactionOutcome');
+		expect(event).toBeDefined();
+		expect(event?.properties).toMatchObject({
+			outcome: 'compaction_returned',
+			model: 'gpt-5-mini',
+		});
+		expect(event?.measurements).toMatchObject({
+			compactThreshold: 1000,
+			promptTokens: 1200,
+			totalTokens: 1207,
+		});
+
+		accessor.dispose();
+		services.dispose();
+	});
+
+	it('emits telemetry when the server exceeds threshold without returning a compaction item', async () => {
+		const services = createPlatformServices();
+		const accessor = services.createTestingAccessor();
+		const instantiationService = accessor.get(IInstantiationService);
+		const logService = accessor.get(ILogService);
+		const telemetryService = new SpyingTelemetryService();
+
+		const completedEvent = {
+			type: 'response.completed',
+			response: {
+				id: 'resp_789',
+				model: 'gpt-5-mini',
+				created_at: 123,
+				usage: {
+					input_tokens: 1500,
+					output_tokens: 9,
+					total_tokens: 1509,
+					input_tokens_details: { cached_tokens: 0 },
+					output_tokens_details: { reasoning_tokens: 0 },
+				},
+				output: [
+					{
+						type: 'message',
+						content: [{ type: 'output_text', text: 'reply' }],
+					}
+				]
+			}
+		};
+
+		const response = createFakeStreamResponse(`data: ${JSON.stringify(completedEvent)}\n\n`);
+		const telemetryData = TelemetryData.createAndMarkAsIssued({ modelCallId: 'model-call-3' }, {});
+
+		const stream = await processResponseFromChatEndpoint(
+			instantiationService,
+			telemetryService,
+			logService,
+			response,
+			1,
+			async () => undefined,
+			telemetryData,
+			1000
+		);
+
+		for await (const _ of stream) {
+			// consume stream
+		}
+
+		const event = telemetryService.getEvents().telemetryServiceEvents.find(e => e.eventName === 'responsesApi.compactionOutcome');
+		expect(event).toBeDefined();
+		expect(event?.properties).toMatchObject({
+			outcome: 'threshold_met_no_compaction',
+			model: 'gpt-5-mini',
+			outputTypes: 'message',
+		});
+		expect(event?.measurements).toMatchObject({
+			compactThreshold: 1000,
+			promptTokens: 1500,
+			totalTokens: 1509,
+		});
 
 		accessor.dispose();
 		services.dispose();
